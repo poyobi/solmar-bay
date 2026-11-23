@@ -1,97 +1,173 @@
-// Solmar Bay — pedestrians.
-// A pooled crowd of thirty walkers wanders the sidewalks, beaches and
-// dockyards. Nearby gunfire or a jacking sends them fleeing; a downed
-// walker drops a cash pickup. Walkers far from the player are recycled
-// to the player's neighbourhood so the streets never feel empty.
+// Solmar Bay — the people on the pavements: neighbours out for a stroll, and how they scatter
+// when the day's driving goes wrong.
+//
+// A pedestrian is a small state machine. Most walk between waypoints on the pavements and
+// the beach; a scare (a punch, a crash, a car on the kerb) sends them fleeing; a few are
+// fixed faces — the mission givers who stand at their spot all day, and the officers and
+// thugs other systems dress them as. This file owns the walking and the fleeing.
 
-// Pedestrians: pooled sidewalk walkers who flee crime and drop cash when downed.
-import {
-  PED_COLORS
-}
-from './config.js';
-import {
-  rngPick, rngRange, clamp, dist
-}
-from './random.js';
-import {
-  surfaceAt, collideBuildings
-}
-from './city.js';
-export function spawnPeds(G) {
-  const peds = [];
-  for (let i = 0; i < 30; i++) peds.push(makePed(G, G.player.x + rngRange(G.rng, -900, 900), G.player.y + rngRange(G.rng, -700, 700)));
-  return peds;
-}
-export function makePed(G, x, y) {
-  // nudge onto a sidewalk / walkable surface
-  for (let tries = 0; tries < 12; tries++) {
-    const s = surfaceAt(x, y);
-    if (s === 'sidewalk' || s === 'sand' || s === 'grass' || s === 'dock') break;
-    x += rngRange(G.rng, -90, 90);
-    y += rngRange(G.rng, -90, 90);
-  }
+import { TUNING } from './config.js';
+import { isWalkableAt, collideCircle, randomWalkPoint } from './city.js';
+import { makeRng, pick, rrange, clamp, dist } from './random.js';
+
+const SHIRTS = ['#e76f51', '#2a9d8f', '#e9c46a', '#457b9d', '#f4a261', '#8338ec', '#ffafcc', '#90be6d', '#f9f7f7', '#577590'];
+const SKINS = ['#f1c27d', '#e0ac69', '#c68642', '#8d5524', '#ffdbac'];
+const PANTS = ['#264653', '#6c757d', '#343a40', '#795548', '#1d3557', '#adb5bd'];
+
+let nextPedId = 1;
+
+/** A fresh pedestrian at a point, in everyday clothes. */
+export function createPed(rng, x, y) {
   return {
-    x: clamp(x, 40, 4200), y: clamp(y, 40, 3560), angle: G.rng() * 6.28, speed: rngRange(G.rng, 42, 78),     color: rngPick(G.rng, PED_COLORS), hp: 30, alive: true, state: 'walk', panic: 0,
-    kind: G.rng() < 0.18 ? 'jogger' : (G.rng() < 0.3 ? 'phone' : 'walker'),     tx: 0, ty: 0, retarget: 0, cashDropped: false, phase: G.rng() * 6.28,
-  }
-  ;
+    id: nextPedId++,
+    x, y,
+    angle: rrange(rng, 0, Math.PI * 2),
+    speed: 0,
+    hp: 60,
+    role: 'walker',
+    state: 'walk',
+    tx: x, ty: y,
+    waitCd: rrange(rng, 0, 2),
+    fleeCd: 0,
+    threatX: 0, threatY: 0,
+    shirt: pick(rng, SHIRTS),
+    skin: pick(rng, SKINS),
+    pants: pick(rng, PANTS),
+    name: null,
+    down: false,
+    downCd: 0,
+    punchCd: 0,
+    stepPhase: rrange(rng, 0, Math.PI * 2),
+  };
 }
-export function updatePed(G, p, dt) {
-  if (!p.alive) return;
-  p.phase += dt * (p.state === 'flee' ? 13 : 7);
-  if (p.panic > 0) p.panic -= dt;
-  const crimeNear = G.lastCrime && dist(p.x, p.y, G.lastCrime.x, G.lastCrime.y) < 300 && G.time - G.lastCrime.t < 4;
-  if (crimeNear || p.panic > 0) p.state = 'flee'; else if (p.state === 'flee') p.state = 'walk';
-  if (p.state === 'flee') {
-    const src = G.lastCrime || G.player;
-    p.angle = Math.atan2(p.y - src.y, p.x - src.x);
-    p.x += Math.cos(p.angle) * 165 * dt;
-    p.y += Math.sin(p.angle) * 165 * dt;
+
+/** Fill the pavements with the starting crowd. */
+export function seedPeds(G) {
+  for (let i = 0; i < TUNING.pedCount; i += 1) {
+    const p = randomWalkPoint(G.rng, G.city, G.city.width / 2, G.city.height / 2, 1500);
+    const ped = createPed(G.rng, p.x, p.y);
+    ped.tx = p.x; ped.ty = p.y;
+    G.peds.push(ped);
+  }
+}
+
+/** Scare every walker near a point: they run from it, and some of them call it in. */
+export function scarePeds(G, x, y, radius, crimeKind) {
+  for (const ped of G.peds) {
+    if (ped.role !== 'walker' || ped.down) continue;
+    if (dist(ped.x, ped.y, x, y) < radius) {
+      ped.state = 'flee';
+      ped.fleeCd = rrange(G.rng, 2.5, 4.5);
+      ped.threatX = x;
+      ped.threatY = y;
+      if (crimeKind && G.rng() < 0.55 && G.reportCrime) G.reportCrime(crimeKind, x, y, 0.7);
+    }
+  }
+}
+
+/** Move one pedestrian one step, by its state. */
+export function updatePed(G, ped, dt) {
+  if (ped.down) {
+    ped.downCd -= dt;
+    return;
+  }
+  if (ped.role === 'giver') {
+    // Givers hold their post; they turn to face the player when he is close.
+    const d = dist(ped.x, ped.y, G.player.x, G.player.y);
+    if (d < 130 && !G.player.inCar) {
+      ped.angle = Math.atan2(G.player.y - ped.y, G.player.x - ped.x);
+    }
+    ped.speed = 0;
+    return;
+  }
+  if (ped.role !== 'walker') return; // officers and thugs are driven by their own systems
+
+  let moveX = 0;
+  let moveY = 0;
+  let speed = TUNING.pedSpeed;
+
+  if (ped.state === 'flee') {
+    ped.fleeCd -= dt;
+    const dx = ped.x - ped.threatX;
+    const dy = ped.y - ped.threatY;
+    const d = Math.hypot(dx, dy) || 1;
+    moveX = dx / d;
+    moveY = dy / d;
+    speed = 196;
+    if (ped.fleeCd <= 0) {
+      ped.state = 'walk';
+      const p = randomWalkPoint(G.rng, G.city, ped.x, ped.y, 260);
+      ped.tx = p.x; ped.ty = p.y;
+    }
   } else {
-    p.retarget -= dt;
-    if (p.retarget <= 0) {
-      p.retarget = rngRange(G.rng, 2, 5);
-      p.tx = p.x + rngRange(G.rng, -260, 260);
-      p.ty = p.y + rngRange(G.rng, -260, 260);
-    }
-    if (p.kind === 'jogger') p.speed = 128;
-    if (p.kind === 'phone' && G.rng() < dt * 0.1) {
-      // phone walkers stop, stare at the screen, then amble on
-      p.retarget = Math.max(p.retarget, 0.8);
-      return;
-    }
-    const d = dist(p.x, p.y, p.tx, p.ty);
-    if (d > 12) {
-      p.angle = Math.atan2(p.ty - p.y, p.tx - p.x);
-      p.x += Math.cos(p.angle) * p.speed * dt;
-      p.y += Math.sin(p.angle) * p.speed * dt;
+    const dx = ped.tx - ped.x;
+    const dy = ped.ty - ped.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 10 || ped.waitCd > 0) {
+      ped.waitCd -= dt;
+      if (ped.waitCd <= -rrange(G.rng, 0.5, 2.4)) {
+        const p = randomWalkPoint(G.rng, G.city, ped.x, ped.y, 420);
+        ped.tx = p.x; ped.ty = p.y;
+        ped.waitCd = 0;
+      }
+      speed = 0;
+    } else {
+      moveX = dx / d;
+      moveY = dy / d;
     }
   }
-  collideBuildings(p, 10, G.city);
-  // run over check
-  for (const c of G.cars) {
-    if (Math.abs(c.speed) > 90 && dist(p.x, p.y, c.x, c.y) < c.w / 2) {
-      hurtPed(G, p, 40, c.driver === 'player');
-      break;
+
+  if (speed > 0 && (moveX !== 0 || moveY !== 0)) {
+    ped.angle = Math.atan2(moveY, moveX);
+    let nx = ped.x + moveX * speed * dt;
+    let ny = ped.y + moveY * speed * dt;
+    // Pavement sense: if the next step leaves walkable ground, slide along or give up.
+    if (!isWalkableAt(G.city, nx, ny) && ped.state !== 'flee') {
+      if (isWalkableAt(G.city, nx, ped.y)) ny = ped.y;
+      else if (isWalkableAt(G.city, ped.x, ny)) nx = ped.x;
+      else {
+        const p = randomWalkPoint(G.rng, G.city, ped.x, ped.y, 300);
+        ped.tx = p.x; ped.ty = p.y;
+        nx = ped.x; ny = ped.y;
+      }
     }
+    const res = collideCircle(G.city, nx, ny, 11);
+    ped.x = res.x;
+    ped.y = res.y;
+    ped.speed = speed;
+    ped.stepPhase += dt * speed * 0.11;
+  } else {
+    ped.speed = 0;
   }
-  // recycle far peds near the player
-  if (dist(p.x, p.y, G.player.x, G.player.y) > 1500) {
-    const np = makePed(G, G.player.x + rngRange(G.rng, -800, 800),     G.player.y + rngRange(G.rng, -600, 600));
-    Object.assign(p, np);
+
+  // Keep the crowd near the action: anyone left far behind re-enters across town.
+  const dp = dist(ped.x, ped.y, G.player.x, G.player.y);
+  if (dp > 1450) {
+    const p = randomWalkPoint(G.rng, G.city, G.player.x, G.player.y, 800);
+    ped.x = p.x; ped.y = p.y; ped.tx = p.x; ped.ty = p.y;
+    ped.state = 'walk';
   }
 }
-export function hurtPed(G, p, dmg, byPlayer) {
-  if (!p.alive) return;
-  p.hp -= dmg;
-  p.panic = 3;
-  if (p.hp <= 0) {
-    p.alive = false;
-    if (!p.cashDropped) {
-      p.cashDropped = true;
-      G.pickups.push({ kind: 'cash', x: p.x, y: p.y, amount: 8 + Math.floor(G.rng() * 30), t: 0 });
-    }
-    if (byPlayer) G.addHeat(0.6, p.x, p.y);
-    G.particles.push({ x: p.x, y: p.y, vx: 0, vy: 0, life: 0.4, max: 0.4, color: '#e63946', size: 6, kind: 'flash' });
+
+/** Knock a pedestrian down (they get up again after a while, wiser and angrier). */
+export function knockDown(G, ped, fromAngle) {
+  if (ped.down) return;
+  ped.hp -= 30;
+  ped.x += Math.cos(fromAngle) * 14;
+  ped.y += Math.sin(fromAngle) * 14;
+  if (ped.hp <= 0 || ped.role === 'walker') {
+    ped.down = ped.hp <= 0;
+    if (ped.down) ped.downCd = 9;
   }
+  if (ped.role === 'walker' && !ped.down) {
+    ped.state = 'flee';
+    ped.fleeCd = 3.4;
+    ped.threatX = ped.x - Math.cos(fromAngle) * 30;
+    ped.threatY = ped.y - Math.sin(fromAngle) * 30;
+  }
+}
+
+/** A tiny deterministic RNG for dressing crowds in screenshots, independent of the sim. */
+export function dressRng(seed) {
+  return makeRng(seed);
 }

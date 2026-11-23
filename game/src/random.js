@@ -1,68 +1,85 @@
-// Solmar Bay — deterministic helpers.
-// mulberry32 gives every system the same seeded stream, so a city built
-// from seed N is the same city on every machine and in every screenshot.
-// The geometry helpers (distance, angle wrapping, circle-vs-rect) are the
-// shared vocabulary of physics, AI and rendering.
+// Solmar Bay — a tiny seeded random number toolkit.
+//
+// The city, the traffic and the screenshot scenes all draw from generators made here, so a
+// seed always grows the same city and the same street life. Nothing in the game calls
+// Math.random for anything that matters to the simulation.
 
-// Deterministic RNG (mulberry32) plus small helpers shared by every system.
-export function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0;
-    a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+/** Hash a string seed (a name, a date) into a 32-bit integer seed. */
+export function hashSeed(text) {
+  let hash = 2166136261 >>> 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
   }
-  ;
+  return hash >>> 0;
 }
-export function rngRange(rng, lo, hi) {
-  return lo + rng() * (hi - lo);
+
+/** Create a mulberry32 generator: fast, deterministic, good enough for a city. */
+export function makeRng(seed) {
+  let state = (typeof seed === 'string' ? hashSeed(seed) : seed) >>> 0;
+  if (state === 0) state = 0x9e3779b9;
+  return function rng() {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
-export function rngInt(rng, lo, hi) {
-  return Math.floor(rngRange(rng, lo, hi + 1));
+
+/** A float in [min, max). */
+export function rrange(rng, min, max) {
+  return min + rng() * (max - min);
 }
-export function rngPick(rng, arr) {
-  return arr[Math.floor(rng() * arr.length) % arr.length];
+
+/** An integer in [min, max], both ends included. */
+export function rint(rng, min, max) {
+  return min + Math.floor(rng() * (max - min + 1));
 }
-export function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
+
+/** One element of a non-empty array. */
+export function pick(rng, items) {
+  return items[Math.floor(rng() * items.length)];
 }
+
+/** True with probability p. */
+export function chance(rng, p) {
+  return rng() < p;
+}
+
+/** Shuffle a copy of an array and return the copy; the original is left alone. */
+export function shuffled(rng, items) {
+  const copy = items.slice();
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = copy[i];
+    copy[i] = copy[j];
+    copy[j] = tmp;
+  }
+  return copy;
+}
+
+/** Clamp a number into [min, max]. */
+export function clamp(value, min, max) {
+  return value < min ? min : value > max ? max : value;
+}
+
+/** Linear interpolation. */
 export function lerp(a, b, t) {
   return a + (b - a) * t;
 }
-export function dist2(ax, ay, bx, by) {
-  const dx = ax - bx, dy = ay - by;
-  return dx * dx + dy * dy;
+
+/** Shortest signed angle from `from` to `to`, in (-PI, PI]. */
+export function angleDelta(from, to) {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }
-export function dist(ax, ay, bx, by) {
-  return Math.sqrt(dist2(ax, ay, bx, by));
-}
-export function angleTo(ax, ay, bx, by) {
-  return Math.atan2(by - ay, bx - ax);
-}
-export function wrapAngle(a) {
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
-  return a;
-}
-export function aabbOverlap(a, b) {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-}
-export function circleRect(cx, cy, r, rect) {
-  const nx = clamp(cx, rect.x, rect.x + rect.w), ny = clamp(cy, rect.y, rect.y + rect.h);
-  return dist2(cx, cy, nx, ny) < r * r;
-}
-export function resolveCircleRect(p, r, rect) {
-  const nx = clamp(p.x, rect.x, rect.x + rect.w), ny = clamp(p.y, rect.y, rect.y + rect.h);
-  const dx = p.x - nx, dy = p.y - ny, d2 = dx * dx + dy * dy;
-  if (d2 >= r * r) return false;
-  if (d2 > 0.001) {
-    const d = Math.sqrt(d2);
-    p.x = nx + (dx / d) * r;
-    p.y = ny + (dy / d) * r;
-  } else {
-    p.x = rect.x - r;
-  }
-  return true;
+
+/** Distance between two points. */
+export function dist(x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  return Math.hypot(dx, dy);
 }

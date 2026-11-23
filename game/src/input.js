@@ -1,54 +1,83 @@
-// Solmar Bay — input.
-// Held keys live in a Set keyed by KeyboardEvent.code; one-shot presses are
-// queued separately and cleared at the end of each fixed step, so a tap
-// between frames is never lost and never counted twice. The mouse position
-// is stored in canvas pixels and converted to world space by the camera.
+// Solmar Bay — keyboard and mouse state for the game loop.
+//
+// The loop polls this every step: `down` answers "is it held", `pressed` answers "did it go
+// down since the last step" (edge-triggered, for menus, doors and punches), and the mouse
+// carries a position plus a click edge for the menu screens. Nothing here knows the game.
 
-// Keyboard + mouse input: held state, one-shot press queue, aim position in screen space.
-export const keys = new Set();
-export const pressed = new Set();
-export const mouse = {
-  x: 640, y: 360, down: false, clicked: false
-}
-;
-let canvasRef = null;
-export function initInput(canvas) {
-  canvasRef = canvas;
-  addEventListener('keydown', (e) => {     if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
-    if (!keys.has(e.code)) pressed.add(e.code);
-    keys.add(e.code);
+export function createInput(canvas) {
+  const down = new Set();
+  const pressed = new Set();
+  const mouse = { x: 0, y: 0, down: false, clicked: false };
+
+  window.addEventListener('keydown', (event) => {
+    if (event.repeat) return;
+    down.add(event.code);
+    pressed.add(event.code);
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(event.code)) {
+      event.preventDefault();
+    }
   });
-  addEventListener('keyup', (e) => keys.delete(e.code));
-  addEventListener('blur', () => { keys.clear(); mouse.down = false; });
-  canvas.addEventListener('mousemove', (e) => {     const r = canvas.getBoundingClientRect();
-    mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
-    mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
+  window.addEventListener('keyup', (event) => {
+    down.delete(event.code);
   });
-  canvas.addEventListener('mousedown', (e) => { if (e.button === 0) { mouse.down = true;
+  window.addEventListener('blur', () => {
+    down.clear();
+    mouse.down = false;
+  });
+
+  canvas.addEventListener('mousemove', (event) => {
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * canvas.width;
+    mouse.y = ((event.clientY - rect.top) / rect.height) * canvas.height;
+  });
+  canvas.addEventListener('mousedown', (event) => {
+    if (event.button === 0) {
+      mouse.down = true;
       mouse.clicked = true;
-    } });
-  addEventListener('mouseup', (e) => { if (e.button === 0) mouse.down = false; });
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-}
-export function wasPressed(...codes) {
-  return codes.some((c) => pressed.has(c));
-}
-export function endFrameInput() {
-  pressed.clear();
-  mouse.clicked = false;
-}
-export function moveAxis() {
-  let x = 0, y = 0;
-  if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
-  if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
-  if (keys.has('KeyW') || keys.has('ArrowUp')) y -= 1;
-  if (keys.has('KeyS') || keys.has('ArrowDown')) y += 1;
-  const m = Math.hypot(x, y) || 1;
+    }
+  });
+  window.addEventListener('mouseup', (event) => {
+    if (event.button === 0) mouse.down = false;
+  });
+
   return {
-    x: x / m, y: y / m, active: x !== 0 || y !== 0
-  }
-  ;
-}
-export function canvasEl() {
-  return canvasRef;
+    mouse,
+    /** Is this key held right now? */
+    isDown(code) {
+      return down.has(code);
+    },
+    /** Did this key go down since the last clearFrame? */
+    wasPressed(code) {
+      return pressed.has(code);
+    },
+    /** Eat a key's edge so a second step in the same frame does not act on it again. */
+    consume(code) {
+      pressed.delete(code);
+    },
+    /** Eat the mouse click's edge, same idea. */
+    consumeClick() {
+      mouse.clicked = false;
+    },
+    /** Any of the given keys held? */
+    anyDown(codes) {
+      return codes.some((code) => down.has(code));
+    },
+    /** Any of the given keys freshly pressed? */
+    anyPressed(codes) {
+      return codes.some((code) => pressed.has(code));
+    },
+    /** Movement axes from the keys: x is -1..1 (right positive), y is -1..1 (down positive). */
+    axes() {
+      const x = (down.has('KeyD') || down.has('ArrowRight') ? 1 : 0)
+        - (down.has('KeyA') || down.has('ArrowLeft') ? 1 : 0);
+      const y = (down.has('KeyS') || down.has('ArrowDown') ? 1 : 0)
+        - (down.has('KeyW') || down.has('ArrowUp') ? 1 : 0);
+      return { x, y };
+    },
+    /** Forget the edges; the loop calls this once per step, after everyone has looked. */
+    clearFrame() {
+      pressed.clear();
+      mouse.clicked = false;
+    },
+  };
 }

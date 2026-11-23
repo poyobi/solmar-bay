@@ -1,166 +1,156 @@
-// Solmar Bay — the player.
-// On foot: WASD movement, sprint, mouse aim, car entry and theft (parked
-// cars may be locked; moving cars are jacked and their drivers flee).
-// In a car: the shared vehicle physics with handbrake and horn. Damage
-// flows through armour first; hitting zero hands over to the Wasted flow.
+// Solmar Bay — Nico Ferrer, the player: walking the pavements, wading at the beach, getting
+// in and out of other people's cars, and staying alive.
+//
+// On foot he is a circle that collides with the city; in a car the car is the body and this
+// file just keeps his position glued to it and hands the driving to vehicles.js. Getting
+// into a car that already has a driver is a jacking — the driver is thrown out and the
+// street notices.
 
-// Player: on-foot movement, car entry/theft, driving controls, damage & respawn.
-import {
-  PLAYER_TUNE, WORLD
-}
-from './config.js';
-import {
-  keys, moveAxis, wasPressed
-}
-from './input.js';
-import {
-  clamp, dist
-}
-from './random.js';
-import {
-  collideBuildings, surfaceAt
-}
-from './city.js';
-import {
-  nearestCar, updateCarPhysics
-}
-from './vehicles.js';
+import { TILE, TUNING } from './config.js';
+import { surfaceAt, collideCircle } from './city.js';
+import { dist } from './random.js';
+import { updatePlayerCar } from './vehicles.js';
+import { scarePeds } from './pedestrians.js';
+
+/** A fresh player at a start point. */
 export function createPlayer(x, y) {
   return {
-    x, y, angle: 0, hp: PLAYER_TUNE.hp, armour: 0, cash: 120, car: null,     weapons: null, weaponIdx: 0, fireCd: 0, reloadT: 0, dead: false, arrestT: 0,     walkPhase: 0, hurtFlash: 0, godShot: false,
-  }
-  ;
+    x, y,
+    angle: -Math.PI / 2,
+    hp: TUNING.playerMaxHp,
+    cash: 40,
+    inCar: false,
+    car: null,
+    punchCd: 0,
+    hurtAgo: 99,
+    stepPhase: 0,
+    moving: false,
+  };
 }
-export function weaponOf(p) {
-  return p.weapons[p.weaponIdx];
+
+/** The nearest car the player could get into, or null. */
+export function nearestEnterableCar(G, maxDist = 52) {
+  let best = null;
+  let bestD = maxDist;
+  for (const car of G.cars) {
+    if (car.wrecked) continue;
+    const d = dist(G.player.x, G.player.y, car.x, car.y);
+    if (d < bestD) { bestD = d; best = car; }
+  }
+  return best;
 }
-export function hurtPlayer(G, dmg) {
-  const p = G.player;
-  if (p.dead || G.mode !== 'play') return;
-  let rest = dmg;
-  if (p.armour > 0) {
-    const absorbed = Math.min(p.armour, rest * 0.7);
-    p.armour -= absorbed;
-    rest -= absorbed;
-  }
-  p.hp -= rest;
-  p.hurtFlash = 0.35;
-  G.shake = Math.max(G.shake, 3);
-  G.audio?.hurt();
-  if (p.hp <= 0) {
-    p.hp = 0;
-    p.dead = true;
-    G.onWasted();
-  }
-}
-export function updatePlayer(G, dt) {
-  const p = G.player;
-  if (p.fireCd > 0) p.fireCd -= dt;
-  if (p.reloadT > 0) {
-    p.reloadT -= dt;
-    if (p.reloadT <= 0) finishReload(G);
-  }
-  if (p.hurtFlash > 0) p.hurtFlash -= dt;
-  if (p.car) {
-    updateDriving(G, dt);
-    return;
-  }
-  const ax = moveAxis();
-  const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
-  const spd = sprint ? PLAYER_TUNE.sprint : PLAYER_TUNE.speed;
-  if (ax.active) {
-    p.x += ax.x * spd * dt;
-    p.y += ax.y * spd * dt;
-    p.angle = Math.atan2(ax.y, ax.x);
-    p.walkPhase += dt * (sprint ? 13 : 9);
-    if (surfaceAt(p.x, p.y) === 'water') {
-      p.x -= ax.x * spd * dt;
-      p.y -= ax.y * spd * dt;
-    }
-  }
-  collideBuildings(p, PLAYER_TUNE.radius, G.city);
-  p.x = clamp(p.x, 16, WORLD.w - 16);
-  p.y = clamp(p.y, 16, WORLD.h - 16);
-  // aim follows mouse in world space
-  p.aimAngle = Math.atan2(G.mouseWorld.y - p.y, G.mouseWorld.x - p.x);
-  if (wasPressed('KeyE')) tryEnterCar(G);
-  if (wasPressed('Digit1')) selectWeapon(G, 0);
-  if (wasPressed('Digit2')) selectWeapon(G, 1);
-  if (wasPressed('Digit3')) selectWeapon(G, 2);
-  if (wasPressed('KeyR')) startReload(G);
-}
-function selectWeapon(G, i) {
-  if (G.player.weapons[i]) {
-    G.player.weaponIdx = i;
-    G.player.reloadT = 0;
-  }
-}
-export function startReload(G) {
-  const p = G.player, w = weaponOf(p);
-  if (!w || w.mag === Infinity || w.inMag >= w.mag || w.ammo <= 0 || p.reloadT > 0) return;
-  p.reloadT = w.def.reload;
-  G.audio?.cash();
-}
-export function finishReload(G) {
-  const p = G.player, w = weaponOf(p);
-  const need = w.def.mag - w.inMag, take = Math.min(need, w.ammo);
-  w.inMag += take;
-  w.ammo -= take;
-}
-export function tryEnterCar(G) {
-  const p = G.player;
-  const car = nearestCar(G, p.x, p.y, 62);
-  if (!car) return;
-  if (car.locked && car.parked) {
-    G.prompt('Locked — find another ride', 1.4);
-    G.audio?.thud();
-    return;
-  }
-  if (car.driver === 'civilian' && !car.parked) {
-    // yank driver out: they flee, heat if witnessed
-    G.addHeat(0.5, car.x, car.y);
-    for (const ped of G.peds) if (dist(ped.x, ped.y, car.x, car.y) < 60 && ped.alive) {
-      ped.panic = 4;
-    }
+
+/** Get into a car (or out of the current one). Called on the interact key's edge. */
+export function enterExitCar(G) {
+  const player = G.player;
+  if (player.inCar) {
+    const car = player.car;
+    if (Math.abs(car.speed) > 46) return; // not at speed — bail-outs are for films
     car.driver = null;
-    car.ai = null;
-    G.prompt('Car jacked!', 1.2);
-  } else if (car.parked) {
-    if (G.rng() < 0.5) G.addHeat(0.3, car.x, car.y);
-    car.parked = false;
+    player.inCar = false;
+    player.car = null;
+    // Step out on the left side of the car.
+    const side = car.angle - Math.PI / 2;
+    const res = collideCircle(G.city, car.x + Math.cos(side) * 34, car.y + Math.sin(side) * 34, TUNING.playerRadius);
+    player.x = res.x;
+    player.y = res.y;
+    player.angle = car.angle;
+    G.audio.blip(320);
+    return;
+  }
+  const car = nearestEnterableCar(G);
+  if (!car) return;
+  if (car.driver === 'ai' && car.kind === 'traffic') {
+    // A jacking: the driver comes out the hard way and the street sees it.
+    const ejected = G.spawnPed(car.x + 20, car.y + 10);
+    if (ejected) {
+      ejected.state = 'flee';
+      ejected.fleeCd = 4;
+      ejected.threatX = player.x;
+      ejected.threatY = player.y;
+    }
+    scarePeds(G, car.x, car.y, 190, 'jack');
+    if (G.reportCrime) G.reportCrime('jack', car.x, car.y, 1);
+    G.audio.blip(140);
+  } else if (car.kind === 'police') {
+    if (G.reportCrime) G.reportCrime('jack', car.x, car.y, 1.4);
+  }
+  if (car.spot) {
+    car.spot.taken = false;
+    car.spot = null;
   }
   car.driver = 'player';
-  p.car = car;
-  G.audio?.door?.();
-  p.x = car.x;
-  p.y = car.y;
-  G.audio?.unlock();
+  player.inCar = true;
+  player.car = car;
+  player.x = car.x;
+  player.y = car.y;
+  G.audio.blip(520);
 }
-export function exitCar(G) {
-  const p = G.player, car = p.car;
-  if (!car) return;
-  car.driver = null;
-  car.speed = 0;
-  p.car = null;
-  p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 34;
-  p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 34;
-  collideBuildings(p, PLAYER_TUNE.radius, G.city);
+
+/** Hurt the player; at zero he is wasted and the run ends. */
+export function hurtPlayer(G, amount) {
+  const player = G.player;
+  if (player.hp <= 0) return;
+  player.hp -= amount;
+  player.hurtAgo = 0;
+  G.fx.push({ kind: 'burst', x: player.x, y: player.y, color: '#ef476f', n: 6 });
+  if (player.hp <= 0) {
+    player.hp = 0;
+    G.endRun('wasted');
+  }
 }
-function updateDriving(G, dt) {
-  const p = G.player, car = p.car;
-  let steer = 0;
-  if (keys.has('KeyA') || keys.has('ArrowLeft')) steer -= 1;
-  if (keys.has('KeyD') || keys.has('ArrowRight')) steer += 1;
-  let throttle = 0;
-  if (keys.has('KeyW') || keys.has('ArrowUp')) throttle = 1;
-  if (keys.has('KeyS') || keys.has('ArrowDown')) throttle = -1;
-  const brake = keys.has('Space');
-  updateCarPhysics(G, car, dt, { throttle, steer, brake });
-  p.x = car.x;
-  p.y = car.y;
-  p.angle = car.angle;
-  p.aimAngle = Math.atan2(G.mouseWorld.y - p.y, G.mouseWorld.x - p.x);
-  if (wasPressed('KeyE')) exitCar(G);
-  if (wasPressed('KeyH')) G.audio?.horn();
-  if (Math.abs(car.speed) > 200 && G.rng() < dt * 0.5) G.audio?.update(0, Math.abs(car.speed), false, G.time);
+
+/** One simulation step for the player, on foot or behind the wheel. */
+export function updatePlayer(G, dt) {
+  const player = G.player;
+  player.punchCd = Math.max(0, player.punchCd - dt);
+  player.hurtAgo += dt;
+  if (player.hp > 0 && player.hp < TUNING.playerMaxHp && player.hurtAgo > 6) {
+    player.hp = Math.min(TUNING.playerMaxHp, player.hp + 2.2 * dt);
+  }
+
+  if (player.inCar) {
+    updatePlayerCar(G, dt);
+    player.x = player.car.x;
+    player.y = player.car.y;
+    player.angle = player.car.angle;
+    player.moving = Math.abs(player.car.speed) > 12;
+    return;
+  }
+
+  const axes = G.input.axes();
+  const running = G.input.isDown('ShiftLeft') || G.input.isDown('ShiftRight');
+  let speed = running ? TUNING.playerRunSpeed : TUNING.playerWalkSpeed;
+  const surface = surfaceAt(G.city, player.x, player.y);
+  if (surface === 'water') speed *= 0.45;
+  if (surface === 'sand') speed *= 0.8;
+
+  player.moving = axes.x !== 0 || axes.y !== 0;
+  if (player.moving) {
+    const len = Math.hypot(axes.x, axes.y) || 1;
+    const mx = axes.x / len;
+    const my = axes.y / len;
+    player.angle = Math.atan2(my, mx);
+    let nx = player.x + mx * speed * dt;
+    let ny = player.y + my * speed * dt;
+    // Deep water stops him: the bay is for boats.
+    if (Math.floor(nx / TILE) < 3) nx = player.x;
+    if (Math.floor(player.x / TILE) < 3 && Math.floor(nx / TILE) >= 3) nx = player.x;
+    const res = collideCircle(G.city, nx, ny, TUNING.playerRadius);
+    player.x = res.x;
+    player.y = res.y;
+    player.stepPhase += dt * speed * 0.075;
+  }
+
+  // Cars are solid to a man on foot: walking into one pushes him out, not through.
+  for (const car of G.cars) {
+    const d = dist(player.x, player.y, car.x, car.y);
+    const min = 30;
+    if (d < min && d > 0.01) {
+      const push = min - d;
+      player.x += ((player.x - car.x) / d) * push;
+      player.y += ((player.y - car.y) / d) * push;
+      if (Math.abs(car.speed) > 150) hurtPlayer(G, 9);
+    }
+  }
 }

@@ -1,43 +1,45 @@
-// Solmar Bay — persistence.
-// One localStorage key holds mission progress, cash, weapon reserves,
-// position, hidden packages, side-activity counts and the mute setting.
-// Autosave happens on every mission completion; the pause menu can save
-// on demand, and the title screen offers Continue when a save exists.
+// Solmar Bay — the save slot: one JSON record in localStorage holding where Nico's story
+// has got to. Cash, the next story mission, side-job count, lifetime earnings, the mute
+// setting and where he was standing. Cars are not saved — in Solmar Bay, cars are borrowed.
 
-// localStorage save: mission progress, cash, weapons, position, settings, completion.
-import {
-  SAVE_KEY
+import { SAVE_KEY } from './config.js';
+
+/** Write the current run's progress. Quietly does nothing if storage is unavailable. */
+export function saveGame(G) {
+  try {
+    const data = {
+      cash: G.player.cash,
+      missionIndex: G.missions.index,
+      sideDone: G.missions.sideDone,
+      totalEarned: G.missions.totalEarned,
+      muted: G.audio.muted,
+      x: Math.round(G.player.x),
+      y: Math.round(G.player.y),
+    };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  } catch {
+    // A private window or a full disk: the game goes on unsaved.
+  }
 }
-from './config.js';
+
+/** Read the save slot, or null when there is nothing (or nothing readable) there. */
 export function loadSave() {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (typeof data !== 'object' || data === null || typeof data.cash !== 'number') return null;
+    return data;
   } catch {
     return null;
   }
 }
-export function writeSave(G) {
-  try {
-    const data = {
-      missionIndex: G.missionIndex, cash: Math.floor(G.player.cash), weapons: G.player.weapons.map((w) => w.ammo),       weaponIdx: G.player.weaponIdx, x: Math.round(G.player.x), y: Math.round(G.player.y),       packages: G.packagesFound, racesWon: G.racesWon || 0, fares: G.fares || 0, muted: G.audio?.muted || false, storyDone: !!G.storyDone,
-    }
-    ;
-    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-  } catch {
-    /* private mode */
-  }
-}
+
+/** Wipe the save slot (a new game does this before its first save). */
 export function clearSave() {
   try {
     localStorage.removeItem(SAVE_KEY);
   } catch {
-    /* ignore */
+    // Nothing to wipe, or nowhere to wipe it from.
   }
-}
-export function completionPct(G) {
-  const story = Math.min(6, G.missionIndex) / 6 * 70;
-  const pkg = (G.packagesFound / 10) * 15;
-  const side = Math.min(1, ((G.racesWon || 0) + (G.fares || 0)) / 6) * 15;
-  return Math.round(story + pkg + side);
 }

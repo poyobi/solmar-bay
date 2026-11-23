@@ -3,16 +3,26 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Solmar Bay — an open-world crime caper</title>
+<title>Solmar Bay — a small city with big debts</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1520; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1c1710; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  /* Read aloud, never shown: the status line screen readers announce. */
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Solmar Bay: top-down open world. Drive, steal cars, run missions, dodge the Solmar PD."></canvas>
+<canvas id="game" aria-label="Solmar Bay: a top-down open-world game. Walk and drive with WASD or the arrow keys, F to get in a car, E to talk, J to punch."></canvas>
 <p id="status" role="status" aria-live="polite"></p>
+<script>
+  // Catch script errors before the module loads, so a broken build says so on the page.
+  window.__gameErrors = [];
+  window.addEventListener('error', function (event) {
+    window.__gameErrors.push(String(event.message || 'unknown error'));
+    var el = document.getElementById('status');
+    if (el) el.textContent = 'error: ' + window.__gameErrors[0];
+  });
+</script>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

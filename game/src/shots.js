@@ -1,129 +1,98 @@
-// Solmar Bay — screenshot staging.
-// Support for the entry's screenshots: ?shot=<key>&seed=N builds one
-// deterministic scene (cover, chase, mission, finale) from the game's own
-// systems — real traffic, real police, real missions — then raises
-// window.__shotReady once the scene has settled for a few frames.
+// Solmar Bay — the screenshot scenes behind ?shot=cover|drive|chase|mission&seed=n.
+//
+// Each scene is staged from a freshly built world and then played forward with the real
+// simulation for a fixed number of steps — the cover is a lived-in street corner, the drive
+// and the chase are genuinely driven by the game's own input path with a stub keyboard, and
+// the mission scene stops mid-conversation with a giver. Same seed, same frame, every time:
+// these are the game's own renders, never arranged by hand in an editor.
 
-// Deterministic screenshot staging: ?shot=<key>&seed=N builds a scene, then flags readiness.
-import {
-  makeCar
+import { createCar } from './vehicles.js';
+import { STORY } from './missions.js';
+
+/** A keyboard that holds the given keys down and never presses anything. */
+function stubInput(downCodes) {
+  return {
+    mouse: { x: 0, y: 0, down: false, clicked: false },
+    isDown: (code) => downCodes.includes(code),
+    wasPressed: () => false,
+    anyDown: (codes) => codes.some((c) => downCodes.includes(c)),
+    anyPressed: () => false,
+    axes: () => ({ x: 0, y: 0 }),
+    consume() {},
+    consumeClick() {},
+    clearFrame() {},
+  };
 }
-from './vehicles.js';
-import {
-  spawnCopCar
+
+/** Run the world forward n fixed steps under a stub keyboard, then give the real one back. */
+function playSteps(G, steps, downCodes = []) {
+  const real = G.input;
+  G.input = stubInput(downCodes);
+  for (let i = 0; i < steps; i += 1) G.stepWorld(1 / 60);
+  G.input = real;
 }
-from './police.js';
-import {
-  spawnEnemy
+
+/** Snap the camera onto the player, the way the game's own camera settles. */
+function snapCamera(G) {
+  G.camera.x = Math.max(0, Math.min(G.city.width - G.view.w, G.player.x - G.view.w / 2));
+  G.camera.y = Math.max(0, Math.min(G.city.height - G.view.h, G.player.y - G.view.h / 2));
 }
-from './combat.js';
-import {
-  startMission, beginCurrentStep
+
+/** Put the player behind the wheel of a fresh hero car at a place, facing a way. */
+function putInCar(G, x, y, angle, color, speed) {
+  const car = createCar(x, y, angle, color, 'traffic');
+  car.driver = 'player';
+  car.speed = speed;
+  G.cars.push(car);
+  G.player.inCar = true;
+  G.player.car = car;
+  G.player.x = x;
+  G.player.y = y;
+  return car;
 }
-from './missions.js';
-export function shotKey() {
-  return new URLSearchParams(location.search).get('shot');
-}
-export function applyShot(G, key) {
-  const p = G.player;
-  if (key === 'cover') {
-    p.x = 2310;
-    p.y = 1335;
-    p.car = null;
-    p.aimAngle = -0.6;
-    startMission(G, 0);
-    G.mission.lineIdx = 99;
-    advanceDialogueShot(G);
-    ensureCrowd(G, p.x, p.y);
-  } else if (key === 'chase') {
-    const car = makeCar(13, 2240, 1748, 0, { color: '#00bbf9' });
-    car.driver = 'player';
-    car.speed = 330;
-    G.cars.push(car);
-    p.car = car;
-    p.x = car.x;
-    p.y = car.y;
-    G.heat = 3.3;
-    spawnCopCar(G, car.x - 190, car.y - 60);
-    spawnCopCar(G, car.x - 320, car.y + 90);
-    spawnCopCar(G, car.x + 260, car.y + 40);
-    for (const c of G.cops) if (c.car) {
-      c.car.speed = 300;
-      c.car.angle = 0;
+
+/**
+ * Stage the named scene in a built world. Any name the game does not know is the cover.
+ * The caller renders afterwards; nothing here draws.
+ */
+export function stageShot(G, name) {
+  const player = G.player;
+  if (name === 'drive') {
+    // Southbound on the coast road, late sun, traffic ahead and the bay on the right.
+    putInCar(G, 360, 1120, Math.PI / 2, '#c0392b', 305);
+    playSteps(G, 52, ['KeyW']);
+  } else if (name === 'chase') {
+    // Three stars on the Centro avenue: two patrol cars already on his tail.
+    putInCar(G, 1210, 840, 0, '#2874a6', 395);
+    G.wanted.heat = 3.3;
+    const copA = createCar(1064, 840, 0, '#f4f6f7', 'police');
+    copA.speed = 380;
+    const copB = createCar(940, 812, 0, '#f4f6f7', 'police');
+    copB.speed = 372;
+    G.cars.push(copA, copB);
+    playSteps(G, 62, ['KeyW']);
+  } else if (name === 'mission') {
+    // Mid-errand: Nico stands with Doña Pilar outside the café, her pitch half-heard.
+    player.x = 505;
+    player.y = 1352;
+    player.angle = Math.PI;
+    playSteps(G, 26, []);
+    const def = STORY[0];
+    G.openDialogue(def.giver.name, def.intro, null);
+    G.missions.marker = { x: def.giver.x, y: def.giver.y };
+  } else {
+    // The cover: the fountain plaza at golden hour — neighbours strolling, a borrowed car
+    // holding up the avenue, the bay at the frame's edge and the beacon on the minimap.
+    player.x = 950;
+    player.y = 1100;
+    player.angle = -0.5;
+    const hero = createCar(1010, 1224, Math.PI, '#f39c12', 'parked');
+    G.cars.push(hero);
+    for (let i = 0; i < 6; i += 1) {
+      G.spawnPed(850 + G.rng() * 300, 900 + G.rng() * 280);
     }
-    ensureCrowd(G, p.x, p.y);
-    G.promptText = 'You jacked a Street Racer!';
-    G.promptT = 9;
-  } else if (key === 'mission') {
-    p.x = 2420;
-    p.y = 2090;
-    p.car = null;
-    p.weaponIdx = 2;
-    p.aimAngle = 0.4;
-    startMission(G, 2);
-    G.mission.lineIdx = 99;
-    advanceDialogueShot(G);
-    spawnEnemy(G, p.x + 150, p.y + 40, {});
-    spawnEnemy(G, p.x + 210, p.y - 70, {});
-    G.enemies[0].hp = 20;
-    G.bullets.push({ x: p.x + 30, y: p.y + 12, vx: 800, vy: 330, life: 0.3, friendly: true, dmg: 10 });
-    ensureCrowd(G, p.x, p.y);
-  } else if (key === 'finale') {
-    G.night = true;
-    p.x = 3840;
-    p.y = 1620;
-    p.car = null;
-    p.aimAngle = 2.6;
-    G.heat = 2.2;
-    G.missionIndex = 4;
-    startMission(G, 4);
-    G.mission.stepIdx = 3;
-    G.mission.state = 'goto';
-    // final delivery leg of the heist
-    G.banner = {
-      title: 'MISSION PASSED', sub: 'Portside Score  •  +$600', t: 1.2
-    }
-    ;
-    for (let i = 0; i < 3; i++) {
-      const rb = makeCar(10, 3660 + i * 48, 1740, Math.PI / 2, { police: true, parked: true,       color: '#1b263b' });
-      G.cars.push(rb);
-      G.roadblocks.push(rb);
-    }
-    spawnCopCar(G, 3560, 1500);
-    ensureCrowd(G, p.x, p.y);
-  } else return false;
-  G.mode = 'play';
-  G.camera.x = Math.max(0, Math.min(4800 - 1280, p.x - 640));
-  G.camera.y = Math.max(0, Math.min(3600 - 720, p.y - 360));
-  let frames = 0;
-  G.shotTick = () => {
-    frames++;
-    if (frames > 14) window.__shotReady = true;
+    G.missions.marker = { x: 888, y: 600 };
+    playSteps(G, 85, []);
   }
-  ;
-  return true;
-}
-function advanceDialogueShot(G) {
-  // skip dialogue into the first action step, with its real setup
-  if (G.mission && G.mission.state === 'dialogue') {
-    G.mission.stepIdx = 1;
-    G.mission.lineIdx = 0;
-    beginCurrentStep(G);
-  }
-}
-function ensureCrowd(G, x, y) {
-  for (const ped of G.peds.slice(0, 8)) {
-    ped.x = x + (G.rng() - 0.5) * 520;
-    ped.y = y + (G.rng() - 0.5) * 380;
-    ped.alive = true;
-  }
-  let placed = 0;
-  for (const c of G.cars) {
-    if (placed >= 5) break;
-    if (!c.parked && c.driver === 'civilian') {
-      c.x = x + (G.rng() - 0.5) * 700;
-      c.y = y + (G.rng() - 0.5) * 120;
-      placed++;
-    }
-  }
+  snapCamera(G);
 }
